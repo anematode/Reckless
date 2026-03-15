@@ -55,7 +55,7 @@ pub unsafe fn activate_ft(pst: &PstAccumulator, threat: &ThreatAccumulator, stm:
 pub unsafe fn propagate_l1(ft_out: Aligned<[u8; L1_SIZE]>, nnz: &[u16], bucket: usize) -> Aligned<[f32; L2_SIZE]> {
     const CHUNKS: usize = 4;
 
-    let mut pre_activations = Aligned::new([simd::zeroed(); L2_SIZE / simd::F32_LANES]);
+    let mut pre_activations = Aligned::new([simd::zeroed(); L2_SIZE / simd::F32_LANES * 2]);
 
     let packed = std::slice::from_raw_parts(ft_out.as_ptr().cast::<i32>(), L1_SIZE / CHUNKS);
 
@@ -76,7 +76,9 @@ pub unsafe fn propagate_l1(ft_out: Aligned<[u8; L1_SIZE]>, nnz: &[u16], bucket: 
             let weights2 = *weights2.add(j * CHUNKS).cast();
 
             let vector = &mut pre_activations[j / simd::F32_LANES];
-            *vector = simd::double_dpbusd(*vector, input1, weights1, input2, weights2);
+            *vector = simd::dpbusd(*vector, input1, weights1);
+            let vector = &mut pre_activations[j / simd::F32_LANES + 1];
+            *vector = simd::dpbusd(*vector, input2, weights2);
         }
     }
 
@@ -99,7 +101,11 @@ pub unsafe fn propagate_l1(ft_out: Aligned<[u8; L1_SIZE]>, nnz: &[u16], bucket: 
     let dequant = simd::splat_f32(DEQUANT_MULTIPLIER);
 
     for i in (0..L2_SIZE).step_by(simd::F32_LANES) {
+        use std::arch::x86_64::*;
         let biases = *PARAMETERS.l1_biases[bucket].as_ptr().add(i).cast();
+        pre_activations[i / simd::F32_LANES] = _mm512_add_epi32(
+            pre_activations[i / simd::F32_LANES], pre_activations[i / simd::F32_LANES + 1]
+        );
         let vector = simd::mul_add_f32(simd::convert_to_f32(pre_activations[i / simd::F32_LANES]), dequant, biases);
         *output.as_mut_ptr().add(i).cast() = simd::clamp_f32(vector, zero, one);
     }
